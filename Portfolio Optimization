@@ -1,0 +1,67 @@
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from scipy.optimize import minimize
+from datetime import datetime, timedelta
+
+
+# Load factor scores
+factors = pd.read_csv("quant_factor_scores.csv", index_col=0)
+
+
+tickers = factors.index.tolist()
+Q_scores = factors["Q_score"].values
+
+
+# Map Q_scores to expected annual returns
+expected_returns = 0.08 + 0.12 * (Q_scores - Q_scores.mean()) / Q_scores.std()
+
+
+# Download daily price data for the tickers
+end_date = datetime.today()
+start_date = end_date - timedelta(days=365*3)
+price_data = yf.download(tickers, start=start_date, end=end_date, progress=False)["Close"]
+price_data = price_data.dropna(thresh=len(price_data)*0.8, axis=1)
+
+
+# Compute daily returns and annualized covariance
+daily_returns = price_data.pct_change().dropna()
+cov_matrix = daily_returns.cov() * 252
+
+
+# Portfolio functions
+def portfolio_volatility(weights, cov_matrix):
+   return np.sqrt(weights.T @ cov_matrix.values @ weights)
+
+
+def portfolio_return(weights, expected_returns):
+   return np.dot(weights, expected_returns)
+
+
+# Objective: minimize volatility with penalty for missing target return
+target_return = 0.1161
+def objective(weights, cov_matrix, expected_returns, target_return):
+   vol = portfolio_volatility(weights, cov_matrix)
+   penalty = 1000 * max(0, target_return - portfolio_return(weights, expected_returns))**2
+   return vol + penalty
+
+
+# Optimization setup
+n = len(tickers)
+x0 = np.array([1/n]*n)
+
+
+max_weight = 0.25
+bounds = [(0, max_weight) for _ in range(n)]
+constraints = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
+
+
+# Run optimizer
+result = minimize(objective, x0, args=(cov_matrix, expected_returns, target_return),
+                 method='SLSQP', bounds=bounds, constraints=constraints)
+
+
+optimal_weights = pd.Series(result.x, index=tickers)
+optimal_weights = optimal_weights.sort_values(ascending=False)
+optimal_weights.to_csv("optimized_portfolio.csv")
+print(optimal_weights)
