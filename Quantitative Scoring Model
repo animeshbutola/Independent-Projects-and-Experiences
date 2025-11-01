@@ -1,0 +1,89 @@
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from datetime import datetime, timedelta
+import time
+
+
+tickers = ["AAPL", "MSFT", "NVDA", "AMD", "REGN", "TMO", "FSLR",
+          "PLUG", "SHOP", "CAT", "DE", "DUK", "JPM", "SQ", "TSLA"]
+
+
+catalysts = {"PLUG": 1, "TSLA": 1}
+
+
+end_date = datetime.today()
+start_date = end_date - timedelta(days=365*3)
+
+
+valid_tickers = []
+for t in tickers:
+   try:
+       data = yf.download(t, start=start_date, end=end_date, progress=False)["Close"]
+       if not data.empty:
+           valid_tickers.append(t)
+   except:
+       continue
+
+
+price_data = yf.download(valid_tickers, start=start_date, end=end_date, progress=False)["Close"]
+price_data = price_data.dropna(thresh=len(price_data)*0.8, axis=1)
+
+
+if price_data.empty:
+   raise ValueError("No valid tickers with sufficient price data!")
+
+
+factors = pd.DataFrame(index=price_data.columns)
+
+
+if len(price_data) > 252:
+   factors["momentum"] = (price_data.iloc[-1] / price_data.iloc[-252]) - 1
+else:
+   factors["momentum"] = np.nan
+
+
+daily_returns = price_data.pct_change().dropna()
+factors["volatility"] = daily_returns.std()
+
+
+fundamentals = {}
+roe_values = {}
+for t in price_data.columns:
+   try:
+       info = yf.Ticker(t).info
+       pb = info.get("priceToBook", np.nan)
+       roe = info.get("returnOnEquity", np.nan)
+       fundamentals[t] = 1/pb if pb and pb > 0 else 0
+       roe_values[t] = roe if roe else 0
+   except:
+       fundamentals[t] = 0
+       roe_values[t] = 0
+   time.sleep(0.2)
+
+
+factors["value"] = pd.Series(fundamentals).reindex(factors.index).fillna(0)
+factors["quality"] = pd.Series(roe_values).reindex(factors.index).fillna(0)
+factors["catalyst"] = pd.Series(catalysts).reindex(factors.index).fillna(0)
+
+
+for col in ["momentum", "value", "quality", "volatility"]:
+   factors[col] = (factors[col] - factors[col].mean()) / factors[col].std()
+
+
+factors["volatility"] = -factors["volatility"]
+
+
+weights = {"momentum": 0.3, "value": 0.2, "quality": 0.3, "volatility": 0.15, "catalyst": 0.05}
+factors["Q_score"] = sum(factors[f]*w for f, w in weights.items())
+
+
+factors = factors.sort_values("Q_score", ascending=False)
+factors = factors.round(3)
+
+
+print("Valid tickers used:", price_data.columns.tolist())
+print(factors[["momentum","value","quality","volatility","catalyst","Q_score"]])
+factors.to_csv("quant_factor_scores.csv")
+
+
